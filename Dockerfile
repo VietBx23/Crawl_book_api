@@ -1,3 +1,4 @@
+# Sử dụng Node 20 với Debian slim
 FROM node:20-bullseye-slim
 
 # Cài dependencies cần thiết cho Chromium
@@ -32,12 +33,13 @@ RUN apt-get update && apt-get install -y \
     lsb-release \
     && rm -rf /var/lib/apt/lists/*
 
+# Thiết lập working directory
 WORKDIR /app
 
-# Copy package.json + package-lock.json trước để cache npm install
+# Copy package.json + package-lock.json để cache npm install
 COPY package*.json ./
 
-# Cài dependencies và Playwright
+# Cài dependencies Node & Playwright (cả Chromium)
 RUN npm install --unsafe-perm && npx playwright install chromium
 
 # Copy toàn bộ project
