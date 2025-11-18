@@ -4,9 +4,9 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
-  "start": "node server.js",
-  "postinstall": "npx playwright install chromium"
-},
+    "start": "node server.js",
+    "postinstall": "npx playwright install chromium"
+  },
   "engines": {
     "node": ">=20.0.0"
   },
