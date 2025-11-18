@@ -27,7 +27,7 @@ async function crawlChapterContent(context, chapterUrl) {
     let title = '';
     try {
         console.log(`[Chapter] Crawl: ${chapterUrl}`);
-        await page.goto(chapterUrl, { timeout: 30000 });
+        await page.goto(chapterUrl, { timeout: 180000  });
 
         const data = await page.evaluate(() => {
             const div = document.querySelector("#booktxthtml");
@@ -72,7 +72,7 @@ async function crawlChapters(context, bookId, numChapters = 20) {
     let chapters = [];
 
     try {
-        await page.goto(xsUrl, { timeout: 30000 });
+        await page.goto(xsUrl, { timeout: 180000  });
         chapters = await page.evaluate(({num, baseUrl}) => {
             const lis = Array.from(document.querySelectorAll("div.all ul li")).slice(0, num);
             return lis.map(li => {
@@ -112,7 +112,7 @@ async function crawlBookDetail(context, bookUrl) {
     let genres = '';
     try {
         console.log(`[BookDetail] Crawl: ${bookUrl}`);
-        await page.goto(bookUrl, { timeout: 30000 });
+        await page.goto(bookUrl, { timeout: 180000  });
         const data = await page.evaluate(() => {
             let authorText = '';
             const authorP = Array.from(document.querySelectorAll("p"))
@@ -143,7 +143,7 @@ async function crawlBookDetail(context, bookUrl) {
 async function crawlBooks(browser, pageNum = 1, numChapters = 20) {
     const context = await browser.newContext();
     const page = await context.newPage();
-    await page.goto(`${BASE_URL}/ben/all/${pageNum}/`, { timeout: 30000 });
+    await page.goto(`${BASE_URL}/ben/all/${pageNum}/`, { timeout: 180000  });
 
     let books = await page.evaluate(() => {
         return Array.from(document.querySelectorAll("dl"))
@@ -216,4 +216,5 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
+
 
