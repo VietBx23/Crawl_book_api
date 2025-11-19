@@ -1,20 +1,20 @@
 import express from 'express';
 import { chromium } from 'playwright';
 import dotenv from 'dotenv';
-dotenv.config(); // Load biến môi trường từ .env
-const app = express();
 
+dotenv.config();
+const app = express();
 const BASE_URL = 'https://www.writerworking.net';
 
-// --- Tối ưu: số trang song song ---
-const MAX_BOOK_TABS = 24;    // số truyện crawl cùng lúc
-const MAX_CHAPTER_TABS = 20; // số chương crawl cùng lúc
+// --- Giới hạn song song để tránh timeout ---
+const MAX_BOOK_TABS = 10;      // số truyện crawl cùng lúc
+const MAX_CHAPTER_TABS = 10;   // số chương crawl cùng lúc
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// --- Crawl nội dung 1 chương (lấy title + content) ---
+// --- Crawl nội dung 1 chương ---
 async function crawlChapterContent(context, chapterUrl) {
     const page = await context.newPage();
     await page.route('**/*', route => {
@@ -27,7 +27,7 @@ async function crawlChapterContent(context, chapterUrl) {
     let title = '';
     try {
         console.log(`[Chapter] Crawl: ${chapterUrl}`);
-        await page.goto(chapterUrl, { timeout: 180000  });
+        await page.goto(chapterUrl, { timeout: 180000 });
 
         const data = await page.evaluate(() => {
             const div = document.querySelector("#booktxthtml");
@@ -38,18 +38,12 @@ async function crawlChapterContent(context, chapterUrl) {
                       .join("\n")
                 : '';
 
-            // Lấy title chương: ưu tiên h1, nếu không có lấy document.title
             let titleText = '';
             const h1 = document.querySelector("h1");
-            if (h1) {
-                titleText = h1.innerText.trim();
-            } else if (document.title) {
-                titleText = document.title.trim();
-            }
+            if (h1) titleText = h1.innerText.trim();
+            else if (document.title) titleText = document.title.trim();
 
-            // Bỏ phần trong ngoặc (), （）
             titleText = titleText.replace(/[\(\（].*?[\)\）]/g, '').trim();
-
             return { content, title: titleText };
         });
 
@@ -65,14 +59,14 @@ async function crawlChapterContent(context, chapterUrl) {
     return { content, title };
 }
 
-// --- Crawl N chương song song ---
-async function crawlChapters(context, bookId, numChapters = 20) {
+// --- Crawl N chương ---
+async function crawlChapters(context, bookId, numChapters = 5) {
     const xsUrl = `${BASE_URL}/xs/${bookId}/1/`;
     const page = await context.newPage();
     let chapters = [];
 
     try {
-        await page.goto(xsUrl, { timeout: 180000  });
+        await page.goto(xsUrl, { timeout: 180000 });
         chapters = await page.evaluate(({num, baseUrl}) => {
             const lis = Array.from(document.querySelectorAll("div.all ul li")).slice(0, num);
             return lis.map(li => {
@@ -90,7 +84,6 @@ async function crawlChapters(context, bookId, numChapters = 20) {
         await page.close();
     }
 
-    // Crawl chương song song tối đa MAX_CHAPTER_TABS
     for (let i = 0; i < chapters.length; i += MAX_CHAPTER_TABS) {
         const batch = chapters.slice(i, i + MAX_CHAPTER_TABS).map(ch =>
             ch.url ? crawlChapterContent(context, ch.url) : Promise.resolve({ content: "", title: "" })
@@ -98,7 +91,7 @@ async function crawlChapters(context, bookId, numChapters = 20) {
         const results = await Promise.all(batch);
         results.forEach((res, idx) => {
             chapters[i + idx].content = res.content;
-            chapters[i + idx].title = res.title;  // Lưu title
+            chapters[i + idx].title = res.title;
         });
     }
 
@@ -112,7 +105,7 @@ async function crawlBookDetail(context, bookUrl) {
     let genres = '';
     try {
         console.log(`[BookDetail] Crawl: ${bookUrl}`);
-        await page.goto(bookUrl, { timeout: 180000  });
+        await page.goto(bookUrl, { timeout: 180000 });
         const data = await page.evaluate(() => {
             let authorText = '';
             const authorP = Array.from(document.querySelectorAll("p"))
@@ -139,15 +132,16 @@ async function crawlBookDetail(context, bookUrl) {
     return { author, genres };
 }
 
-// --- Crawl truyện song song ---
-async function crawlBooks(browser, pageNum = 1, numChapters = 20) {
+// --- Crawl truyện ---
+async function crawlBooks(browser, pageNum = 1, numChapters = 5) {
     const context = await browser.newContext();
     const page = await context.newPage();
-    await page.goto(`${BASE_URL}/ben/all/${pageNum}/`, { timeout: 180000  });
+    await page.goto(`${BASE_URL}/ben/all/${pageNum}/`, { timeout: 180000 });
 
     let books = await page.evaluate(() => {
         return Array.from(document.querySelectorAll("dl"))
             .filter(dl => !dl.closest('div.right.hidden-xs'))
+            .slice(0, 15) // chỉ lấy tối đa 15 truyện
             .map(dl => {
                 const a = dl.querySelector("dt a");
                 const img = dl.querySelector("a.cover img");
@@ -196,11 +190,10 @@ app.get('/crawl', async (req, res) => {
     const pageNum = parseInt(req.query.page) || 1;
     const numChapters = parseInt(req.query.num_chapters) || 5;
     const browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox','--disable-setuid-sandbox']
-});
+        headless: true,
+        args: ['--no-sandbox','--disable-setuid-sandbox']
+    });
 
-   
     try {
         const books = await crawlBooks(browser, pageNum, numChapters);
         res.json({ results: books });
@@ -212,10 +205,6 @@ app.get('/crawl', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
-
-
-
