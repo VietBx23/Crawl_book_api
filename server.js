@@ -1,210 +1,163 @@
 import express from 'express';
+import axios from 'axios';
+import * as cheerio from 'cheerio';
+import http from 'http';
+import https from 'https';
+import pLimit from 'p-limit';
 import { chromium } from 'playwright';
-import dotenv from 'dotenv';
-
-dotenv.config();
 const app = express();
 const BASE_URL = 'https://www.writerworking.net';
 
-// --- Giới hạn song song để tránh timeout ---
-const MAX_BOOK_TABS = 10;      // số truyện crawl cùng lúc
-const MAX_CHAPTER_TABS = 10;   // số chương crawl cùng lúc
+// Axios instance với keep-alive và timeout 10s
+const axiosInstance = axios.create({
+    httpAgent: new http.Agent({ keepAlive: true }),
+    httpsAgent: new https.Agent({ keepAlive: true }),
+    timeout: 10000
+});
 
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
+// --- Crawl danh sách sách ---
+async function getBooks(pageNum = 1, maxBooks = 20) {
+    const url = `${BASE_URL}/ben/all/${pageNum}/`;
+    const { data } = await axiosInstance.get(url);
+    const $ = cheerio.load(data);
 
-// --- Crawl nội dung 1 chương ---
-async function crawlChapterContent(context, chapterUrl) {
-    const page = await context.newPage();
-    await page.route('**/*', route => {
-        const type = route.request().resourceType();
-        if (['image','stylesheet','font','media'].includes(type)) route.abort();
-        else route.continue();
+    const books = [];
+    $('dl').each((i, dl) => {
+        if (books.length >= maxBooks) return false;
+        if ($(dl).closest('div.right.hidden-xs').length) return;
+
+        const a = $(dl).find('dt a');
+        const img = $(dl).find('a.cover img');
+        const desc = $(dl).find('dd');
+
+        const bookUrl = a.attr('href')?.startsWith('http') ? a.attr('href') : BASE_URL + a.attr('href');
+
+        books.push({
+            title: a.attr('title') || a.text(),
+            cover_image: img.attr('data-src') || img.attr('src') || '',
+            description: desc.text().trim(),
+            bookUrl, // chỉ dùng nội bộ crawl
+            author: '',
+            genres: [],
+            chapters: []
+        });
     });
 
-    let content = '';
-    let title = '';
-    try {
-        console.log(`[Chapter] Crawl: ${chapterUrl}`);
-        await page.goto(chapterUrl, { timeout: 180000 });
-
-        const data = await page.evaluate(() => {
-            const div = document.querySelector("#booktxthtml");
-            const content = div
-                ? Array.from(div.querySelectorAll("p"))
-                      .map(p => p.innerText.trim())
-                      .filter(t => t.length > 0)
-                      .join("\n")
-                : '';
-
-            let titleText = '';
-            const h1 = document.querySelector("h1");
-            if (h1) titleText = h1.innerText.trim();
-            else if (document.title) titleText = document.title.trim();
-
-            titleText = titleText.replace(/[\(\（].*?[\)\）]/g, '').trim();
-            return { content, title: titleText };
-        });
-
-        content = data.content;
-        title = data.title;
-
-    } catch (e) {
-        console.log(`[Chapter] Lỗi: ${chapterUrl}`, e);
-    } finally {
-        await page.close();
-    }
-
-    return { content, title };
+    return books;
 }
 
-// --- Crawl N chương ---
-async function crawlChapters(context, bookId, numChapters = 5) {
-    const xsUrl = `${BASE_URL}/xs/${bookId}/1/`;
-    const page = await context.newPage();
-    let chapters = [];
+// --- Crawl chi tiết book ---
+async function getBookDetail(bookUrl) {
+    const { data } = await axiosInstance.get(bookUrl);
+    const $ = cheerio.load(data);
 
-    try {
-        await page.goto(xsUrl, { timeout: 180000 });
-        chapters = await page.evaluate(({num, baseUrl}) => {
-            const lis = Array.from(document.querySelectorAll("div.all ul li")).slice(0, num);
-            return lis.map(li => {
-                const a = li.querySelector("a");
-                if (!a) return null;
-                const onclick = a.getAttribute("onclick") || "";
-                const match = onclick.match(/location\.href='(.*?)'/);
-                const url = match ? match[1] : null;
-                return { url: url ? baseUrl + url.replace(/\\/g, "") : null };
-            }).filter(x => x);
-        }, { num: numChapters, baseUrl: BASE_URL });
-    } catch (e) {
-        console.log(`[Chapters] Lỗi crawl list: ${xsUrl}`, e);
-    } finally {
-        await page.close();
+    let author = '';
+    let genres = '';
+
+    $('p').each((i, p) => {
+        if ($(p).find('b').text().trim() === '作者：') {
+            author = $(p).find('a').text().trim();
+        }
+    });
+
+    const ol = $('ol.container');
+    if (ol.find('li').length >= 2) {
+        genres = ol.find('li').eq(1).text().trim();
     }
 
-    for (let i = 0; i < chapters.length; i += MAX_CHAPTER_TABS) {
-        const batch = chapters.slice(i, i + MAX_CHAPTER_TABS).map(ch =>
-            ch.url ? crawlChapterContent(context, ch.url) : Promise.resolve({ content: "", title: "" })
-        );
-        const results = await Promise.all(batch);
-        results.forEach((res, idx) => {
-            chapters[i + idx].content = res.content;
-            chapters[i + idx].title = res.title;
-        });
-    }
+    return { author, genres };
+}
+
+// --- Crawl danh sách chương ---
+async function getChapters(bookUrl, numChapters = 5) {
+    const { data } = await axiosInstance.get(bookUrl);
+    const $ = cheerio.load(data);
+
+    const chapters = [];
+    $('div.all ul li a').slice(0, numChapters).each((i, a) => {
+        const href = $(a).attr('href');
+        if (!href) return;
+        const chapterUrl = href.startsWith('http') ? href : BASE_URL + href;
+        chapters.push({ chapterUrl });
+    });
 
     return chapters;
 }
 
-// --- Crawl chi tiết truyện ---
-async function crawlBookDetail(context, bookUrl) {
-    const page = await context.newPage();
-    let author = '';
-    let genres = '';
-    try {
-        console.log(`[BookDetail] Crawl: ${bookUrl}`);
-        await page.goto(bookUrl, { timeout: 180000 });
-        const data = await page.evaluate(() => {
-            let authorText = '';
-            const authorP = Array.from(document.querySelectorAll("p"))
-                                .find(p => p.querySelector("b")?.innerText.trim() === "作者：");
-            if (authorP) {
-                const a = authorP.querySelector("a");
-                if (a) authorText = a.innerText.trim();
-            }
-            let genreText = '';
-            const ol = document.querySelector("ol.container");
-            if (ol && ol.querySelectorAll("li").length >= 2) {
-                genreText = ol.querySelectorAll("li")[1].innerText.trim();
-            }
-            return { author: authorText, genres: genreText };
-        });
-        author = data.author;
-        genres = data.genres;
-        console.log(`[BookDetail] Hoàn tất: Tác giả=${author}, Thể loại=${genres}`);
-    } catch (e) {
-        console.log(`[BookDetail] Lỗi crawl: ${bookUrl}`, e);
-    } finally {
-        await page.close();
+// --- Crawl nội dung 1 chương ---
+async function getChapterContent(chapterUrl) {
+    const browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+
+    await page.goto(chapterUrl, { waitUntil: 'domcontentloaded' });
+
+    // Chờ container nội dung load xong
+    await page.waitForSelector('#booktxthtml');
+
+    // Lấy title
+    let title = await page.locator('h1').textContent();
+    if (!title) {
+        title = await page.title();
     }
-    return { author, genres };
-}
+    title = title.replace(/[\(\（].*?[\)\）]/g, '').trim();
 
-// --- Crawl truyện ---
-async function crawlBooks(browser, pageNum = 1, numChapters = 5) {
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    await page.goto(`${BASE_URL}/ben/all/${pageNum}/`, { timeout: 180000 });
-
-    let books = await page.evaluate(() => {
-        return Array.from(document.querySelectorAll("dl"))
-            .filter(dl => !dl.closest('div.right.hidden-xs'))
-            .slice(0, 15) // chỉ lấy tối đa 15 truyện
-            .map(dl => {
-                const a = dl.querySelector("dt a");
-                const img = dl.querySelector("a.cover img");
-                const desc = dl.querySelector("dd");
-                const bookIdMatch = a ? a.getAttribute("href").match(/\/kanshu\/(\d+)\//) : null;
-                return {
-                    url: a ? (a.href.startsWith('http') ? a.href : BASE_URL + a.getAttribute('href')) : null,
-                    bookId: bookIdMatch ? bookIdMatch[1] : null,
-                    title: a?.title || a?.innerText,
-                    author: '',
-                    cover_image: img ? (img.getAttribute('data-src') || img.getAttribute('src')) : null,
-                    description: desc ? desc.innerText.trim() : '',
-                    genres: [],
-                    chapters: []
-                };
-            });
+    // Lấy nội dung chương
+    const content = await page.locator('#booktxthtml').evaluate(el => {
+        // replace <br> bằng \n và lấy text
+        const html = el.innerHTML.replace(/<br\s*\/?>/gi, '\n');
+        const tmp = document.createElement('div');
+        tmp.innerHTML = html;
+        return tmp.innerText.trim();
     });
-    await page.close();
 
-    const results = [];
-    for (let i = 0; i < books.length; i += MAX_BOOK_TABS) {
-        const batch = books.slice(i, i + MAX_BOOK_TABS).map(async book => {
-            if (book.url && book.bookId) {
-                console.log(`[Book] Crawl: ${book.title}`);
-                const detail = await crawlBookDetail(context, book.url);
-                book.author = detail.author || '';
-                book.genres = detail.genres ? [detail.genres] : [];
-                book.chapters = await crawlChapters(context, book.bookId, numChapters);
-                console.log(`[Book] Hoàn tất: ${book.title}`);
-            }
-            return book;
-        });
-        results.push(...await Promise.all(batch));
-    }
-
-    await context.close();
-    return results;
+    await browser.close();
+    return { title, content };
 }
 
-// --- Routes ---
-app.get('/', (req, res) => {
-    res.send('API is working. Use /crawl?page=1&num_chapters=5');
-});
 
+// --- Concurrent map ---
+async function concurrentMap(items, fn, limit = 5) {
+    const limiter = pLimit(limit);
+    return Promise.all(items.map(item => limiter(() => fn(item))));
+}
+
+// --- Route crawl tối ưu ---
 app.get('/crawl', async (req, res) => {
     const pageNum = parseInt(req.query.page) || 1;
-    const numChapters = parseInt(req.query.num_chapters) || 5;
-    const browser = await chromium.launch({
-        headless: true,
-        args: ['--no-sandbox','--disable-setuid-sandbox']
-    });
+    const numChapters = parseInt(req.query.num_chapters) || 5; // số chương mỗi sách
+
+    const CONCURRENT_BOOKS = 5;       
+    const CONCURRENT_CHAPTERS = 5;
+    const MAX_BOOKS_PER_PAGE = 20; // giới hạn tối đa để không overload
 
     try {
-        const books = await crawlBooks(browser, pageNum, numChapters);
+        const books = await getBooks(pageNum, MAX_BOOKS_PER_PAGE);
+
+        await concurrentMap(books, async (book) => {
+            // Crawl detail + chapters song song
+            const [detail, chapters] = await Promise.all([
+                getBookDetail(book.bookUrl),
+                getChapters(book.bookUrl, numChapters)
+            ]);
+
+            book.author = detail.author;
+            book.genres = detail.genres ? [detail.genres] : [];
+
+            // Crawl content từng chương
+            book.chapters = await concurrentMap(chapters, async (ch) => {
+                const content = await getChapterContent(ch.chapterUrl);
+                return { title: content.title, content: content.content };
+            }, CONCURRENT_CHAPTERS);
+
+            delete book.bookUrl;            
+            book.chapters.forEach(ch => delete ch.chapterUrl); 
+        }, CONCURRENT_BOOKS);
+
         res.json({ results: books });
     } catch (e) {
+        console.error(e);
         res.status(500).json({ error: e.toString() });
-    } finally {
-        await browser.close();
     }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
+app.listen(3000, () => console.log('Server running on port 3000'));
